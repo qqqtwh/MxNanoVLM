@@ -1,0 +1,42 @@
+# Training Hyperparameters
+lr_mp: 0.00512
+lr_backbones: 5.0e-5
+
+# Data Settings
+data_cutoff_idx: null  # Use 'null' for None in YAML
+val_ratio: 0.025
+batch_size: 7 # 8
+max_images_per_example: 4
+max_images_per_knapsack: 18
+max_sample_length: 1024
+
+# Training Loop
+gradient_accumulation_steps: 1 # 8
+max_grad_norm: 1.0
+eval_in_epochs: true
+eval_interval: 2        # 800 = gradient_accumulation_steps * 100
+stats_log_interval: 200   # = gradient_accumulation_steps * 25
+max_training_steps: 5000
+
+# Model & Compilation
+compile: false
+resume_from_vlm_checkpoint: false
+
+# Dataset
+train_dataset_cache: "./resources/datasets"
+train_dataset_path: "HuggingFaceM4/the_cauldron"
+train_dataset_name:
+  - "cocoqa"
+  # - "all"
+  # - "ai2d"
+  # - "vistext"
+
+# Logging & Evaluation
+log_wandb: false # true
+wandb_entity: "HuggingFace"
+
+# lmms-eval Integration
+use_lmms_eval: false  # true
+lmms_eval_tasks: "mmstar,mmmu,ocrbench,textvqa"
+lmms_eval_limit: 2000
+lmms_eval_batch_size: 128

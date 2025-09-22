@@ -1,0 +1,48 @@
+每条数据都有 images 和 texts 字段
+
+'ai2d'：2434条数据:
+    images: [PIL]
+    texts: [
+        {
+            'user': 'Question: What process does this diagram portray?\nChoices:\nA. Erosion\nB. Water Cycle\nC. Photosynthesis\nD. Moon Phases\nAnswer with the letter.'
+            'assistant': 'Answer: C'
+            'source': 'AI2D'
+        },
+        {
+            'user': 'Question: Which solar body is portrayed in this diagram?\nChoices:\nA. Moon\nB. Black Hole\nC. Sun\nD. Nebula\nAnswer with the letter.'
+            'assistant': 'Answer: C'
+            'source': 'AI2D'
+        },
+    ]
+    
+'cocoqa'：46287条数据:
+    images: [PIL]
+    texts: [
+        {
+            'user': 'Where is the black cat laying down\nGive a very brief answer.'
+            'assistant': 'Sink.'
+            'source': 'COCO-QA'
+        },
+        {
+            'user': 'Where is the black cat laying down\nBe succinct.'
+            'assistant': 'Sink.'
+            'source': 'COCO-QA'
+        },
+        {
+            'user': 'Where is the black cat laying\nConcise answer only.'
+            'assistant': 'Sink.'
+            'source': 'COCO-QA'
+        }
+    ]
+
+'vistext'：9969条数据
+    images: [PIL]
+    texts: [
+        {
+            'user': 'What insights can be drawn from this chart?'
+            'assistant': 'This is a bar chart named Share of prisoners under sentence of death in the United States at year-end 2018 , by age group. The x-axis plots Years of age while the y-axis plots Share of death row prisoners. Share of prisoners under sentence of death in the United States was the highest among 45-49 years old. It was the lowest among those aged 18-19. The trend was clearly growing until the age of 45-49 where it reached its peak. Then it started to fall. The decline is remarkably pronounced after the age of 60.'
+            'source': 'VisText'  
+        },
+    ]
+
+
