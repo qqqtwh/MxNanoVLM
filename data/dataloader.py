@@ -32,6 +32,7 @@ class BaseCollator(object):
             "attention_mask": torch.stack(batch["attention_mask"]),
             "images": batch["images"],
             "labels": torch.stack(batch["labels"]),
+            "idx": batch["idx"],
         }
         return res
 

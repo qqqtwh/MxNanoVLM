@@ -46,24 +46,24 @@ class ModalityProjector(nn.Module):
             └───┴───┴───┴───┴───┴───┴───┴───┘
 
         """
-        bsz, seq, embed_dim = x.size()
+        bsz, seq, embed_dim = x.size()  # bs,32*32,768
         seq_root = int(seq**0.5)
         assert seq_root**2 == seq # Seq 长度必须可以开平方
         assert seq_root % self.scale_factor == 0 # Sequence root 必须是scale_factor的倍数
 
         height = width = seq_root
-        x = x.view(bsz, height, width, embed_dim)
-        h_out = height // self.scale_factor
-        w_out = width // self.scale_factor
+        x = x.view(bsz, height, width, embed_dim)   # (bs, 32*32, 768)->(bs, 32, 32, 768) 
+        h_out = height // self.scale_factor # 8
+        w_out = width // self.scale_factor  # 8
         
         x = x.reshape(bsz, h_out, self.scale_factor, w_out, self.scale_factor, embed_dim)
         x = x.permute(0, 1, 3, 2, 4, 5).contiguous()
-        x = x.reshape(bsz, h_out * w_out, embed_dim * self.scale_factor**2)
+        x = x.reshape(bsz, h_out * w_out, embed_dim * self.scale_factor**2) # (bs, 8*8, 768*4*4)
         
         return x
 
     def forward(self, x):
-        x = self.pixel_shuffle(x)   # (bsz, seq, embed_dim) --> (bsz, sqrt(seq)//scale_factor * sqrt(seq)//scale_factor, embed_dim*scale_factor*scale_factor)
-        x = self.proj(x)            # (bsz, sqrt(seq)//scale_factor * sqrt(seq)//scale_factor, embed_dim*scale_factor*scale_factor) -> (bsz, lm_hidden_dim)
+        x = self.pixel_shuffle(x)   # (bs, 32*32, 768) -> (bs, (32//4)**2, 768*4*4)
+        x = self.proj(x)            # (bs, (32//4)**2, 768*4*4) -> (bs, (32//4)**2, 960)
 
         return x

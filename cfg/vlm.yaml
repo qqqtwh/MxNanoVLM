@@ -29,7 +29,7 @@ lm_max_length: 1024
 lm_use_tokens: false         # Set to False when using as VLM backbone
 lm_tie_weights: true
 
-# --- Multi-Processor (MP) ---
+# --- ModalityProjector (MP) ---
 mp_pixel_shuffle_factor: 4
 mp_image_token_length: 64   # 
 

@@ -43,6 +43,7 @@ def get_tokenizer(name, extra_special_tokens=None, chat_template=None,cache_dir=
     if extra_special_tokens is not None:
         for key, token_str in extra_special_tokens.items():
             setattr(tokenizer, key, token_str)
+    setattr(tokenizer,'image_token_id',tokenizer.encode(tokenizer.image_token))
     TOKENIZERS_CACHE[name] = tokenizer
     
     return TOKENIZERS_CACHE[name]
@@ -82,9 +83,8 @@ if __name__ == '__main__':
     lm_chat_template = "{% for message in messages %}{{'<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>' + '\n'}}{% endfor %}{% if add_generation_prompt %}{{ '<|im_start|>assistant\n' }}{% endif %}"
     vlm_extra_tokens = {'image_token': '<|image|>', 'r1c1': '<row_1_col_1>', 'r1c2': '<row_1_col_2>', 'r1c3': '<row_1_col_3>', 'r1c4': '<row_1_col_4>', 'r2c1': '<row_2_col_1>', 'r2c2': '<row_2_col_2>', 'r2c3': '<row_2_col_3>', 'r2c4': '<row_2_col_4>', 'r3c1': '<row_3_col_1>', 'r3c2': '<row_3_col_2>', 'r3c3': '<row_3_col_3>', 'r3c4': '<row_3_col_4>', 'r4c1': '<row_4_col_1>', 'r4c2': '<row_4_col_2>', 'r4c3': '<row_4_col_3>', 'r4c4': '<row_4_col_4>'}
     a = get_tokenizer(lm_tokenizer, vlm_extra_tokens, lm_chat_template,lm_cache_dir)
-    print(getattr(a, "image_token"))
-    print(getattr(a, "r1c1"))
-    print(a)
+    
+    # print(a)
     '''
     GPT2TokenizerFast(
         name_or_path='HuggingFaceTB/SmolLM2-360M-Instruct', 

@@ -1,14 +1,336 @@
+import math
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+
+def rotate_half(x: torch.Tensor) -> torch.Tensor:
+    '''将输入的一半维度隐藏进行旋转
+        x = torch.tensor([[[1.0, 2.0, 3.0, 4.0]]])  # shape: (1, 1, 4)
+        x1, x2 = x.chunk(2, dim=-1)
+        # x1 = [[[1.0, 2.0]]]   ← 前半部分
+        # x2 = [[[3.0, 4.0]]]   ← 后半部分
+
+        # -x2 = [[[-3.0, -4.0]]]
+        # torch.cat((-x2, x1), dim=-1) → [[[-3.0, -4.0, 1.0, 2.0]]]
+
+    '''
+    x1, x2 = x.chunk(2, dim=-1)
+    return torch.cat((-x2, x1), dim=-1)
+
+def apply_rotary_pos_embd(q: torch.Tensor, k: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor, unsqueeze_dim:int=1)-> tuple[torch.Tensor, torch.Tensor]:
+    
+    cos = cos.unsqueeze(unsqueeze_dim)  # [bs, 1, seq_len, 64]
+    sin = sin.unsqueeze(unsqueeze_dim)  # [bs, 1, seq_len, 64]
+    
+    # Apply complex multiplication:
+    # (q * cos) + (rotate_half(q) * sin)
+    q_embed = (q * cos) + (rotate_half(q) * sin)
+    k_embed = (k * cos) + (rotate_half(k) * sin)
+    
+    return q_embed, k_embed
 
 
+class RMSNorm(nn.Module):
+    """
+        x = [3.0, 4.0, 0.0, 0.0]  # hidden_dim=4
+        x² = [9, 16, 0, 0]
+        mean(x²) = (9+16+0+0)/4 = 6.25
+        rms = sqrt(6.25) = 2.5
+        irms = 1 / 2.5 = 0.4
+
+        x_normalized = x * 0.4 = [1.2, 1.6, 0.0, 0.0]
+        x_scaled = x_normalized * weight  # weight 是可学习的
+    """
+    def __init__(self, cfg):
+        super().__init__()
+
+        self.weight = nn.Parameter(torch.ones(cfg.lm_hidden_dim)) # 960
+        self.eps = cfg.lm_rms_eps   # 1.0e-5
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        
+        irms = torch.rsqrt(torch.mean(x ** 2, dim=-1, keepdim=True) + self.eps)
+        x = x * irms * self.weight
+
+        return x
+
+
+class RotaryEmbedding(nn.Module):
+
+    def __init__(self,cfg):
+        super().__init__()
+    
+        assert cfg.lm_hidden_dim % cfg.lm_n_heads == 0, "lm_hidden_dim % lm_n_heads !=0"
+        self.head_dim = cfg.lm_hidden_dim // cfg.lm_n_heads  # 960//15 == 64
+        self.lm_re_base = cfg.lm_re_base    # 100000 旋转编码基数，越大频率越低->位置编码变化越平缓，支持长序列
+        self.max_seq_len = cfg.lm_max_position_embeddings # 8192 训练时支持的最长序列长度，用于后续缩放判断
+
+        inv_freq = 1.0 / (self.lm_re_base ** (torch.arange(0, self.head_dim, 2).float() / self.head_dim)) # 1/(100000**([0,2,..,62])) # 32
+        self.register_buffer("inv_freq", inv_freq)
+        self.attention_scaling = cfg.lm_attn_scaling    # 1.0
+
+    @torch.no_grad()
+    def forward(self, position_ids: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+
+        bs, seq_len = position_ids.shape
+        max_seq = position_ids.max() + 1
+        if max_seq > self.max_seq_len:  # 动态缩放
+            scale = max_seq / self.max_seq_len  # 如果当前序列长度 > 训练时最大长度 → 缩放频率（降低频率）以支持外推
+            inv_freq = self.inv_freq / scale
+        else:
+            inv_freq = self.inv_freq
+        
+        freqs = position_ids.unsqueeze(-1) * inv_freq.unsqueeze(0) # (bs, 100, 1) * (1, 32) -> (bs, 100, 32)
+        freqs = freqs.reshape(bs, seq_len, -1)  # (bs, 100, 32) -> (bs, 100, 32)
+        
+        emb = torch.cat([freqs, freqs],dim=-1)  # (bs, 100, 64)
+
+        cos = torch.cos(emb) * self.attention_scaling   # (bs, 100, 64)
+        sin = torch.sin(emb) * self.attention_scaling   # (bs, 100, 64)
+
+        return cos,sin
+
+
+class LanguageModelMLP(nn.Module):
+    
+    def __init__(self, cfg):
+        super().__init__()
+        self.embd_dim = cfg.lm_hidden_dim
+        self.inter_dim = cfg.lm_inter_dim
+
+        self.activation_fn = F.silu
+        self.gate_proj = nn.Linear(self.embd_dim, self.inter_dim, bias=False)
+        self.up_proj = nn.Linear(self.embd_dim, self.inter_dim, bias=False)
+        self.down_proj = nn.Linear(self.inter_dim, self.embd_dim, bias=False)
+
+    def forward(self, x):
+        
+        gate = self.activation_fn(self.gate_proj(x))
+        x = self.up_proj(x)
+        x = self.down_proj(gate * x)
+
+        return x
+
+class LanguageModelGroupedQueryAttention(nn.Module):
+    
+    def __init__(self, cfg):
+        super().__init__()
+
+        self.n_heads = cfg.lm_n_heads           # 15
+        self.n_kv_heads = cfg.lm_n_kv_heads     # 5
+        self.embd_dim = cfg.lm_hidden_dim       # 960
+        self.dropout = cfg.lm_dropout           # 0.0
+
+        assert self.n_heads % self.n_kv_heads == 0, "n_heads % n_kv_heads != 0"
+        assert self.embd_dim % self.n_heads == 0, "embd_dim % num_heads !=0"
+
+        self.n_kv_groups = self.n_heads // self.n_kv_heads  # 3
+        self.head_dim = self.embd_dim // self.n_heads       # 64
+
+        self.q_proj = nn.Linear(self.embd_dim, self.embd_dim, bias=False)   # 960,960
+        self.k_proj = nn.Linear(self.embd_dim, self.head_dim * self.n_kv_heads, bias=False) # 960, 64*5
+        self.v_proj = nn.Linear(self.embd_dim, self.head_dim * self.n_kv_heads, bias=False) # 960, 64*5
+        self.out_proj = nn.Linear(self.embd_dim, self.embd_dim, bias=False) # 960,960
+
+        self.attn_dropout = nn.Dropout(self.dropout)
+        self.resid_dropout = nn.Dropout(self.dropout)
+
+        # Use scaled dot product attention if available
+        self.sdpa = hasattr(torch.nn.functional, 'scaled_dot_product_attention')
+        if not self.sdpa:
+            print("Warning: scaled dot product attention not available, using standard attention in LM.")
+
+    def forward(self, x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor, attention_mask=None, block_kv_cache=None) -> tuple[torch.Tensor, dict]:
+        
+        is_prefill = block_kv_cache is None
+
+        B, T_curr, C = x.size()
+
+        q_curr = self.q_proj(x).view(B, T_curr, self.n_heads, self.head_dim).transpose(1, 2)  # (B, 15, T_curr, 64)
+        k_curr = self.k_proj(x).view(B, T_curr, self.n_kv_heads, self.head_dim).transpose(1, 2) # (B, 5, T_curr, 64)
+        v_curr = self.v_proj(x).view(B, T_curr, self.n_kv_heads, self.head_dim).transpose(1, 2) # (B, 5, T_curr, 64)
+
+        # Apply rotary embeddings to the current q and k
+        q, k_rotated = apply_rotary_pos_embd(q_curr, k_curr, cos, sin)
+
+        # Check if we can use cached keys and values
+        if not is_prefill and block_kv_cache['key'] is not None:
+            # Concatenate with cached K, V
+            # k_rotated and v_curr are for the new token(s)
+            k = block_kv_cache['key']
+            v = block_kv_cache['value']
+            k = torch.cat([k, k_rotated], dim=2)
+            v = torch.cat([v, v_curr], dim=2)
+            block_kv_cache['key'] = k
+            block_kv_cache['value'] = v
+        else:
+            # No cache, this is the first pass (prefill)
+            k = k_rotated
+            v = v_curr
+            block_kv_cache = {'key': k, 'value': v}
+
+        # Repeat K, V for Grouped Query Attention
+        k_exp = k.repeat_interleave(self.n_kv_groups, dim=1) # (B, 5, T_kv, 64)
+        v_exp = v.repeat_interleave(self.n_kv_groups, dim=1) # (B, 5, T_kv, 64)
+        
+        T_kv = k_exp.size(2) # Total sequence length of keys/values
+
+        # Prepare attention mask for SDPA or manual path
+        # attention_mask is (B, T_kv_total_length), 1 for attend, 0 for pad
+        additive_attn_mask = None
+        if attention_mask is not None:
+            # The current `attention_mask` parameter is assumed to be `[B, total_sequence_length_kv]`
+            # Let's make it `[B, 1, 1, T_kv]` for SDPA.
+            mask_for_keys = attention_mask[:, :T_kv] # Ensure mask matches key length [B, T_kv]
+            additive_attn_mask = (1.0 - mask_for_keys.unsqueeze(1).unsqueeze(2).float()) * torch.finfo(q.dtype).min
+            # This additive_attn_mask shape is [B, 1, 1, T_kv]
+
+        if self.sdpa and x.device.type != 'mps':
+            # During decode, no additional masking needed as [1, T_kv] is naturally causal
+            is_causal = (T_curr == T_kv and T_curr > 1)
+            y = torch.nn.functional.scaled_dot_product_attention(
+                q, k_exp, v_exp,
+                attn_mask=additive_attn_mask, 
+                dropout_p=self.dropout if self.training else 0.0,
+                is_causal=is_causal
+            )
+        else:
+            # Manual attention implementation
+            attn = torch.matmul(q, k_exp.transpose(2, 3)) / math.sqrt(self.head_dim) # (B, n_heads, T_curr, T_kv)
+            # During decode: no additional masking needed as [1, T_kv] is naturally causal
+            if T_curr == T_kv and T_curr > 1:
+                causal_mask_val = torch.tril(torch.ones(T_curr, T_curr, device=x.device, dtype=torch.bool)).view(1, 1, T_curr, T_curr)
+                attn = attn.masked_fill(~causal_mask_val, float('-inf'))
+
+            if additive_attn_mask is not None: # Additive padding mask
+                # additive_attn_mask is [B,1,1,T_kv], needs to be broadcast to [B, n_heads, T_curr, T_kv]
+                attn = attn + additive_attn_mask 
+
+            attn = F.softmax(attn, dim=-1)
+            attn = self.attn_dropout(attn)
+            y = attn @ v_exp
+            
+        y = y.transpose(1, 2).contiguous().view(B, T_curr, C)
+        y = self.out_proj(y)
+        y = self.resid_dropout(y)
+
+        return y, block_kv_cache
+
+class LanguageModelBlock(nn.Module):
+    def __init__(self, cfg):
+        super().__init__()
+        self.attn = LanguageModelGroupedQueryAttention(cfg)
+        self.mlp = LanguageModelMLP(cfg)
+        self.norm1 = RMSNorm(cfg) # Input Norm
+        self.norm2 = RMSNorm(cfg) # Post Attention Norm
+    
+    def forward(self, x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor, attention_mask: torch.Tensor=None, block_kv_cache: dict=None):
+        res = x
+        x = self.norm1(x)
+        x, block_kv_cache = self.attn(x, cos, sin, attention_mask, block_kv_cache)
+        x = res + x
+
+        res = x
+        x = self.norm2(x)
+        x = self.mlp(x)
+        x = res + x
+
+        return x, block_kv_cache
 
 class LanguageModel(nn.Module):
     def __init__(self, cfg) -> None:
         super().__init__()
 
-    def forward(self):
-        pass
+        self.cfg = cfg
+        self.lm_use_tokens = cfg.lm_use_tokens      # false
+        self.lm_tie_weights = cfg.lm_tie_weights    # true
+
+        self.token_embedding = nn.Embedding(cfg.lm_vocab_size, cfg.lm_hidden_dim) # 49169,960
+        self.rotary_embed = RotaryEmbedding(cfg)
+
+        self.blocks = nn.ModuleList([LanguageModelBlock(cfg) for _ in range(cfg.lm_n_blocks)])  # 32
+        self.norm = RMSNorm(cfg)
+        self.head = nn.Linear(cfg.lm_hidden_dim, cfg.lm_vocab_size, bias=False) # 960,49169
+        if self.lm_tie_weights:
+            self.head.weight = self.token_embedding.weight
+        
+        self.apply(self._init_weights)
+
+    def _init_weights(self, module):
+        if isinstance(module, nn.Linear):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+            if module.bias is not None:
+                torch.nn.init.zeros_(module.bias)
+        elif isinstance(module, nn.Embedding):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+        elif isinstance(module, RMSNorm):
+            module.weight.data.fill_(1.0)
+
+
+    def forward(self, x: torch.Tensor, attention_mask: torch.Tensor=None, kv_cache: list[dict]=None, start_pos: int=0):
+        if self.lm_use_tokens:
+            x = self.token_embedding(x)
+
+        B, T_curr, _ = x.size()
+        
+        # Create position_ids for the current sequence based on start_pos
+        current_position_ids = torch.arange(start_pos, start_pos + T_curr, device=x.device).unsqueeze(0).expand(B, -1)
+        cos, sin = self.rotary_embed(current_position_ids) # Get rotary position embeddings for current tokens
+
+        # Initialize new KV cache if none provided
+        if kv_cache is None:
+            kv_cache = [None] * len(self.blocks)
+
+        for i, block in enumerate(self.blocks):
+            x, kv_cache[i] = block(x, cos, sin, attention_mask, kv_cache[i])
+
+        x = self.norm(x)
+
+        # Compute logits if we are using tokens, otherwise stay in the embedding space
+        if self.lm_use_tokens: 
+            x = self.head(x) 
+
+        return x, kv_cache
+    
+    def generate(self, inputs, max_new_tokens:int = 20):
+        if inputs.dim == 1:
+            inputs = inputs.unsqueeze(0)
+        
+        generated_outputs = inputs.clone()
+
+        prompt_output, kv_cache_list = self.forward(
+            generated_outputs,
+            attention_mask=None,
+            kv_cache=None,
+            start_pos=0
+        )
+
+        last_output = prompt_output[:,-1,:] # (bs, dim)
+
+        for i in range(max_new_tokens):
+            if self.lm_use_tokens:
+                next_output = torch.argmax(last_output, dim=-1, keepdim= True)
+            else:
+                next_output = last_output.unsqueeze(1)
+            
+            generated_outputs = torch.cat((generated_outputs, next_output), dim=1)
+
+            current_token_start_pos = generated_outputs.size(1) - 1
+            if i==max_new_tokens - 1:
+                break
+            
+            decode_step_output, kv_cache_list = self.forward(
+                next_output,
+                attention_mask=None,
+                kv_cache=kv_cache_list,
+                start_pos=current_token_start_pos
+            )
+
+            last_output = decode_step_output[:, -1, :]
+        
+
+        return generated_outputs
+        
 
     def from_pretrained(self,cfg):
         pass

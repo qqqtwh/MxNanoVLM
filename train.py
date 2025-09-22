@@ -110,8 +110,8 @@ def train(train_config,vlm_config):
 
         for i,batch in enumerate(synchronized_dataloader_step(train_loader, is_dist())):
             if is_master():
-                main_logger.info(f'### batch {i}/{len(train_loader)} ###')
-                print(f'### {get_rank()} batch {i}/{len(train_loader)} ###')
+                main_logger.info(f'### {get_rank()} batch {i}/{len(train_loader)} ###')
+                
             is_update_step = (i+1) % train_config.gradient_accumulation_steps or i+1 == len(train_loader)
             batch_start_time = time.time()
 
@@ -119,6 +119,7 @@ def train(train_config,vlm_config):
             input_ids = batch["input_ids"].to(device)
             labels = batch["labels"].to(device)
             attention_mask = batch["attention_mask"].to(device)
+            idx = batch["idx"]
 
             data_load_end = time.time() 
             data_load_time = data_load_end - data_load_start
@@ -133,7 +134,7 @@ def train(train_config,vlm_config):
             autocast_context = torch.autocast(device_type=device.type, dtype=torch.bfloat16 if device.type in ['cuda','cpu'] else torch.float16)
             with autocast_context:
                 with context:
-                    _,loss = model(input_ids,images,attention_mask=attention_mask, targets=labels)
+                    _,loss = model(input_ids,images,attention_mask=attention_mask, targets=labels,idx=idx)
             if train_config.gradient_accumulation_steps>1: # 让每次 backward 的梯度规模平滑，便于稳定裁剪和优化
                 loss = loss/train_config.gradient_accumulation_steps
             loss.backward()

@@ -158,17 +158,14 @@ class VQADataset(BaseDataset):
         return labels
     
     def __getitem__(self,idx):
-        # print(idx)
         item = self.dataset[idx]
 
         images_data = item['images']
         if not isinstance(images_data,list):
             images_data  = [images_data]
-        
         processed_images,splitted_image_counts = self._process_images(images_data)
         messages = self._get_messages(item,splitted_image_counts)
         input_ids,mask,attention_mask = self._prepare_inputs_and_loss_mask(messages)
-            
         labels = self._get_labels(input_ids,mask)
 
         return {
@@ -206,7 +203,7 @@ class ConstantLengthDataset(IterableDataset):
             if  len(sample["input_ids"])>0 and len(sample["input_ids"]) <= self.max_length:
                 batch.append(sample)
                 if len(batch) == self.batch_size:
-                    print(f'iter rank {self.rank},{len(batch),[i['idx'] for i in batch]}')
+                    # print(f'iter rank {self.rank},{len(batch),[i['idx'] for i in batch]}')
                     yield batch
                     batch = []  # 清空，准备下一个 batch
             
