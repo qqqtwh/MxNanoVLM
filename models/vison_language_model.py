@@ -4,7 +4,8 @@ from data.processors import get_tokenizer
 from .vision_transformer import ViT
 from .language_model import LanguageModel
 from .modality_projector import ModalityProjector
-
+import numpy as np
+import torch.nn.functional as F
 
 class VisionLanguageModel(nn.Module):
     def __init__(self,cfg, backbone=True):
@@ -38,19 +39,27 @@ class VisionLanguageModel(nn.Module):
         image_bemd = self.MP(image_bemd)            # (bs, 32*32, 768) ->(bs, (32//4)**2, 960)
 
         # 2.获取文本token的特征向量 -> token_embed
-        token_embed = self.decoder.token_embedding(input_ids)
+        token_embed = self.decoder.token_embedding(input_ids)   # (bs, 1024) -> (bs, 1024, 960)
 
-        # 3.将 图像特征 和 文本特征
-        updated_token_embd = self._replace_img_tokens_with_embd(input_ids,token_embed,image_bemd)
+        # 3.将 文本特征 中使用<|image|>标记的960维向量替换为对应的 960维图像特征
+        updated_token_embd = self._replace_img_tokens_with_embd(input_ids,token_embed,image_bemd) # (bs, 1024, 960)
 
-        return 1,torch.tensor([1.0],requires_grad=True)
+        # 4.LLM模型推理
+        logits,_ = self.decoder(updated_token_embd, attention_mask=attention_mask) # (bs, 1024, 960)
+
+        loss = None
+        if targets is not None:
+            logits = self.decoder.head(logits) # (bs, 1024, 49169)
+            loss = F.cross_entropy(logits.reshape(-1, logits.size(-1)), targets.reshape(-1), ignore_index=-100)
+
+        return logits, loss
 
     def _replace_img_tokens_with_embd(self,input_ids,token_embed,image_bemd):
         '''
             使用 image_bemd 替换 input_ids 中的 <|image|> 占位符
         '''
         update_token_emded = token_embed.clone()
-        mask = (input_ids == self.tokenizer.image_token_id) # system user 部分为1
+        mask = (input_ids == self.tokenizer.image_token_id) # 找出 <|image|> 即 token_id = 49152的地方
         update_token_emded[mask] = image_bemd.view(-1, image_bemd.size(-1)).to(update_token_emded.dtype)
 
         return update_token_emded

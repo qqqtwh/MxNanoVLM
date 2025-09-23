@@ -16,12 +16,15 @@ from data.dataloader import get_dataloaders
 import torch.optim as optim
 from torch.nn.parallel import DistributedDataParallel
 import time
+from datetime import datetime
+import pytz
 from statistics import mean
 import argparse
 from models.vison_language_model import VisionLanguageModel
 from data.dataset import synchronized_dataloader_step
 
-main_logger = get_logger('train.log')
+train_time = datetime.now(pytz.timezone('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M:%S')
+main_logger = get_logger(f'logs/{train_time}_train.log')
 
 def train(train_config,vlm_config):
     if is_master(): 
@@ -39,6 +42,7 @@ def train(train_config,vlm_config):
     if is_master():
         main_logger.info(f"nanVLM 使用 {sum(p.numel() for p in model.parameters())} 参数量进行初始化")
         main_logger.info(f"训练摘要 {'(global)' if is_dist() else ''}: 在 {int(get_world_size()) if is_dist() else 1} 个GPU上训练")
+        main_logger.info(f"     训练集有 {int(len(train_loader)*train_config.batch_size*get_world_size())} 条, 验证集有 {int(len(val_loader)*train_config.batch_size*get_world_size())} 条")
         main_logger.info(f"     每个 GPU上 训练集有 {int(len(train_loader))} 个 batch, 验证集有 {int(len(val_loader))} 个 batch")
         main_logger.info(f"     batch_size {int(train_config.batch_size)}")
         main_logger.info(f"     梯度累积 {int(train_config.batch_size*train_config.gradient_accumulation_steps)} 个 batch 更新")
@@ -312,12 +316,14 @@ def main():
         main_logger.info('##################################')
         main_logger.info('### 配置信息 ###')
         main_logger.info('--- VLM 配置 ---')
-        # main_logger.info(vlm_config)
+        main_logger.info(vlm_config)
         main_logger.info('--- Train 配置 ---')
         main_logger.info(train_config)
         
-    
-    train(train_config,vlm_config)
+    try:
+        train(train_config,vlm_config)
+    except Exception as e:
+        main_logger.error(f'{e}')
 
     if is_dist():
         destroy_dist()

@@ -5,9 +5,6 @@ except ImportError:
     from custom_transformers import DynamicResize, SplitImage
 from transformers import AutoTokenizer
 
-# 大模型 tokenizer 字典缓存
-TOKENIZERS_CACHE = {"HuggingFaceTB/SmolLM2-360M-Instruct":None}
-
 # 图像预处理
 def get_image_processor(max_img_size, splitted_img_size):
     return transforms.Compose([
@@ -17,17 +14,20 @@ def get_image_processor(max_img_size, splitted_img_size):
         
     ])
 
+TOKENIZERS_CACHE = {"HuggingFaceTB/SmolLM2-360M-Instruct":None}
+
 # 获取分词模型
 def get_tokenizer(name, extra_special_tokens=None, chat_template=None,cache_dir=None):
+
+    tokenizer_init_kwargs = {"use_fast": True}
+    if extra_special_tokens is not None:
+        tokenizer_init_kwargs["extra_special_tokens"] = extra_special_tokens
+    if chat_template is not None:
+        tokenizer_init_kwargs["chat_template"] = chat_template
+    if cache_dir is not None:
+        tokenizer_init_kwargs["cache_dir"] = cache_dir
+
     if name not in TOKENIZERS_CACHE:
-        tokenizer_init_kwargs = {"use_fast": True}
-        if extra_special_tokens is not None:
-            tokenizer_init_kwargs["extra_special_tokens"] = list(extra_special_tokens.values())
-        if chat_template is not None:
-            tokenizer_init_kwargs["chat_template"] = chat_template
-        if cache_dir is not None:
-            tokenizer_init_kwargs["cache_dir"] = cache_dir
-        
         tokenizer = AutoTokenizer.from_pretrained(
             name,
             **tokenizer_init_kwargs,
@@ -36,14 +36,10 @@ def get_tokenizer(name, extra_special_tokens=None, chat_template=None,cache_dir=
     else:
         tokenizer = AutoTokenizer.from_pretrained(
             name,
-            cache_dir = cache_dir,
+            **tokenizer_init_kwargs,
             local_files_only=True,
             )
-    
-    if extra_special_tokens is not None:
-        for key, token_str in extra_special_tokens.items():
-            setattr(tokenizer, key, token_str)
-    setattr(tokenizer,'image_token_id',tokenizer.encode(tokenizer.image_token))
+        
     TOKENIZERS_CACHE[name] = tokenizer
     
     return TOKENIZERS_CACHE[name]
@@ -76,32 +72,22 @@ def get_image_string(tokenizer, splitted_image_counts, mp_image_token_length):
 
 if __name__ == '__main__':
 
-    
-
     lm_tokenizer = "HuggingFaceTB/SmolLM2-360M-Instruct"
     lm_cache_dir = "/workspace/vlm/resources/models"
     lm_chat_template = "{% for message in messages %}{{'<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>' + '\n'}}{% endfor %}{% if add_generation_prompt %}{{ '<|im_start|>assistant\n' }}{% endif %}"
     vlm_extra_tokens = {'image_token': '<|image|>', 'r1c1': '<row_1_col_1>', 'r1c2': '<row_1_col_2>', 'r1c3': '<row_1_col_3>', 'r1c4': '<row_1_col_4>', 'r2c1': '<row_2_col_1>', 'r2c2': '<row_2_col_2>', 'r2c3': '<row_2_col_3>', 'r2c4': '<row_2_col_4>', 'r3c1': '<row_3_col_1>', 'r3c2': '<row_3_col_2>', 'r3c3': '<row_3_col_3>', 'r3c4': '<row_3_col_4>', 'r4c1': '<row_4_col_1>', 'r4c2': '<row_4_col_2>', 'r4c3': '<row_4_col_3>', 'r4c4': '<row_4_col_4>'}
     a = get_tokenizer(lm_tokenizer, vlm_extra_tokens, lm_chat_template,lm_cache_dir)
     
-    # print(a)
+    print(a)
     '''
-    GPT2TokenizerFast(
-        name_or_path='HuggingFaceTB/SmolLM2-360M-Instruct', 
-        vocab_size=49152, 
-        model_max_length=8192, 
-        is_fast=True, 
-        padding_side='right', 
-        truncation_side='right', 
-        special_tokens={
-            'bos_token': '<|im_start|>', 
-            'eos_token': '<|im_end|>', 
-            'unk_token': '<|endoftext|>', 
-            'pad_token': '<|im_end|>', 
-            'additional_special_tokens': ['<|im_start|>', '<|im_end|>']
-            }, 
-        clean_up_tokenization_spaces=False, 
-        added_tokens_decoder={
+    GPT2TokenizerFast(name_or_path='HuggingFaceTB/SmolLM2-360M-Instruct', vocab_size=49152, model_max_length=8192, is_fast=True, padding_side='right', truncation_side='right', 
+    special_tokens={
+        'bos_token': '<|im_start|>', 
+        'eos_token': '<|im_end|>', 
+        'pad_token': '<|im_end|>', 
+        'unk_token': '<|endoftext|>', 
+        'additional_special_tokens': ['<|im_start|>', '<|im_end|>'], 'image_token': '<|image|>', 'r1c1': '<row_1_col_1>', 'r1c2': '<row_1_col_2>', 'r1c3': '<row_1_col_3>', 'r1c4': '<row_1_col_4>', 'r2c1': '<row_2_col_1>', 'r2c2': '<row_2_col_2>', 'r2c3': '<row_2_col_3>', 'r2c4': '<row_2_col_4>', 'r3c1': '<row_3_col_1>', 'r3c2': '<row_3_col_2>', 'r3c3': '<row_3_col_3>', 'r3c4': '<row_3_col_4>', 'r4c1': '<row_4_col_1>', 'r4c2': '<row_4_col_2>', 'r4c3': '<row_4_col_3>', 'r4c4': '<row_4_col_4>'}, 
+        clean_up_tokenization_spaces=False, added_tokens_decoder={
             0: AddedToken("<|endoftext|>", rstrip=False, lstrip=False, single_word=False, normalized=False, special=True),
             1: AddedToken("<|im_start|>", rstrip=False, lstrip=False, single_word=False, normalized=False, special=True),
             2: AddedToken("<|im_end|>", rstrip=False, lstrip=False, single_word=False, normalized=False, special=True),
@@ -119,7 +105,24 @@ if __name__ == '__main__':
             14: AddedToken("<jupyter_output>", rstrip=False, lstrip=False, single_word=False, normalized=False, special=True),
             15: AddedToken("<jupyter_script>", rstrip=False, lstrip=False, single_word=False, normalized=False, special=True),
             16: AddedToken("<empty_output>", rstrip=False, lstrip=False, single_word=False, normalized=False, special=True),
-        }
+            49152: AddedToken("<|image|>", rstrip=False, lstrip=False, single_word=False, normalized=False, special=True),
+            49153: AddedToken("<row_1_col_1>", rstrip=False, lstrip=False, single_word=False, normalized=False, special=True),
+            49154: AddedToken("<row_1_col_2>", rstrip=False, lstrip=False, single_word=False, normalized=False, special=True),
+            49155: AddedToken("<row_1_col_3>", rstrip=False, lstrip=False, single_word=False, normalized=False, special=True),
+            49156: AddedToken("<row_1_col_4>", rstrip=False, lstrip=False, single_word=False, normalized=False, special=True),
+            49157: AddedToken("<row_2_col_1>", rstrip=False, lstrip=False, single_word=False, normalized=False, special=True),
+            49158: AddedToken("<row_2_col_2>", rstrip=False, lstrip=False, single_word=False, normalized=False, special=True),
+            49159: AddedToken("<row_2_col_3>", rstrip=False, lstrip=False, single_word=False, normalized=False, special=True),
+            49160: AddedToken("<row_2_col_4>", rstrip=False, lstrip=False, single_word=False, normalized=False, special=True),
+            49161: AddedToken("<row_3_col_1>", rstrip=False, lstrip=False, single_word=False, normalized=False, special=True),
+            49162: AddedToken("<row_3_col_2>", rstrip=False, lstrip=False, single_word=False, normalized=False, special=True),
+            49163: AddedToken("<row_3_col_3>", rstrip=False, lstrip=False, single_word=False, normalized=False, special=True),
+            49164: AddedToken("<row_3_col_4>", rstrip=False, lstrip=False, single_word=False, normalized=False, special=True),
+            49165: AddedToken("<row_4_col_1>", rstrip=False, lstrip=False, single_word=False, normalized=False, special=True),
+            49166: AddedToken("<row_4_col_2>", rstrip=False, lstrip=False, single_word=False, normalized=False, special=True),
+            49167: AddedToken("<row_4_col_3>", rstrip=False, lstrip=False, single_word=False, normalized=False, special=True),
+            49168: AddedToken("<row_4_col_4>", rstrip=False, lstrip=False, single_word=False, normalized=False, special=True),
+    }
     )
     
     '''

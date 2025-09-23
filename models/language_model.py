@@ -165,13 +165,13 @@ class LanguageModelGroupedQueryAttention(nn.Module):
             block_kv_cache['value'] = v
         else:
             # No cache, this is the first pass (prefill)
-            k = k_rotated
-            v = v_curr
+            k = k_rotated   # (bs, n_kv_heads, 1024, head_dim)
+            v = v_curr      # (bs, n_kv_heads, 1024, head_dim)
             block_kv_cache = {'key': k, 'value': v}
 
         # Repeat K, V for Grouped Query Attention
-        k_exp = k.repeat_interleave(self.n_kv_groups, dim=1) # (B, 5, T_kv, 64)
-        v_exp = v.repeat_interleave(self.n_kv_groups, dim=1) # (B, 5, T_kv, 64)
+        k_exp = k.repeat_interleave(self.n_kv_groups, dim=1) # (B, 15, T_kv, 64)
+        v_exp = v.repeat_interleave(self.n_kv_groups, dim=1) # (B, 15, T_kv, 64)
         
         T_kv = k_exp.size(2) # Total sequence length of keys/values
 
@@ -271,7 +271,7 @@ class LanguageModel(nn.Module):
         if self.lm_use_tokens:
             x = self.token_embedding(x)
 
-        B, T_curr, _ = x.size()
+        B, T_curr, _ = x.size() # (bs, 1024, 960)
         
         # Create position_ids for the current sequence based on start_pos
         current_position_ids = torch.arange(start_pos, start_pos + T_curr, device=x.device).unsqueeze(0).expand(B, -1)
@@ -279,7 +279,7 @@ class LanguageModel(nn.Module):
 
         # Initialize new KV cache if none provided
         if kv_cache is None:
-            kv_cache = [None] * len(self.blocks)
+            kv_cache = [None] * len(self.blocks) # 32
 
         for i, block in enumerate(self.blocks):
             x, kv_cache[i] = block(x, cos, sin, attention_mask, kv_cache[i])
@@ -288,10 +288,11 @@ class LanguageModel(nn.Module):
 
         # Compute logits if we are using tokens, otherwise stay in the embedding space
         if self.lm_use_tokens: 
-            x = self.head(x) 
+            x = self.head(x) # (bs, 1024, 49169)
 
         return x, kv_cache
     
+    @torch.inference_mode()
     def generate(self, inputs, max_new_tokens:int = 20):
         if inputs.dim == 1:
             inputs = inputs.unsqueeze(0)
@@ -327,7 +328,6 @@ class LanguageModel(nn.Module):
             )
 
             last_output = decode_step_output[:, -1, :]
-        
 
         return generated_outputs
         
