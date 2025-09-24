@@ -7,3 +7,4 @@ logs
 wandb
 demo.py
 checkpoints
+results

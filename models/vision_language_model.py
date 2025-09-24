@@ -191,9 +191,9 @@ class VisionLanguageModel(nn.Module):
         
         token_embed = self.decoder.token_embedding(input_ids)
 
-        initial_combined_embeds = self._replace_img_tokens_with_embd(input_ids,token_embed,image_bemd)   # (bs, 1024, 960)
+        initial_combined_embeds = self._replace_img_tokens_with_embd(input_ids,token_embed,image_bemd)   # (bs, seq_len, 960)
 
-        current_total_seq_len = initial_combined_embeds.size(1) # 1024
+        current_total_seq_len = initial_combined_embeds.size(1) # seq_len
         batch_size = input_ids.size(0)
 
         prefill_output, kv_cache_list = self.decoder(
@@ -201,12 +201,12 @@ class VisionLanguageModel(nn.Module):
             attention_mask=attention_mask, # Use the provided attention mask
             kv_cache=None,
             start_pos=0
-        )
+        ) # kv_cache_list [{'key':(bs,5,seq_len, 64), 'value':(bs,5,seq_len, 64)}]*32
 
         last_token_output_from_prefill = prefill_output[:, -1, :] #  (bs, 960)
         
         if not self.decoder.lm_use_tokens:
-            current_logits = self.decoder.head(last_token_output_from_prefill) 
+            current_logits = self.decoder.head(last_token_output_from_prefill) # (bs, 49169)
         else:
             current_logits = last_token_output_from_prefill 
         
@@ -224,8 +224,8 @@ class VisionLanguageModel(nn.Module):
             newly_generated_ids_list.append(next_token_id)
             next_token_embed = self.decoder.token_embedding(next_token_id) # (bs, 1, 960)
 
-            current_token_start_pos = current_total_seq_len # 1024
-            current_total_seq_len += 1 # 1025
+            current_token_start_pos = current_total_seq_len # seq_len
+            current_total_seq_len += 1 # seq_len+1
 
             if attention_mask is not None: # (bs, 1024)
                 attention_mask = torch.cat(
@@ -237,7 +237,7 @@ class VisionLanguageModel(nn.Module):
                 attention_mask = attention_mask,
                 kv_cache = kv_cache_list,
                 start_pos = current_token_start_pos
-            ) # (bs, 1, 960)
+            ) # decode_step_output (bs, 1, 960) # kv_cache_list [{'key':(bs,5,seq_len+1, 64), 'value':(bs,5,seq_len+1, 64)}]*32
 
             last_token_output = decode_step_output[:,-1,:] # (bs, 960)
 
@@ -256,18 +256,18 @@ class VisionLanguageModel(nn.Module):
             device = generated_ids.device
 
             eos_mask = (generated_ids == self.tokenizer.eos_token_id)
-            col_indices_for_min = torch.arange(seq_len, device=device) # 列
-
+            col_indices_for_min = torch.arange(seq_len, device=device) # generated_ids 的索引
+            # False的地方填充seq_len + 1，True的地方不变 ---- 即 保留eos_mask的地方，其他地方变为 seq_len + 1，方便后续查照结束位置
             masked_col_indices = torch.where(eos_mask, col_indices_for_min.unsqueeze(0).expand_as(generated_ids), seq_len + 1) 
-
+            # 找到 generated_ids 中的结束位置的值，即 seq_len + 1
             first_eos_indices_values = torch.min(masked_col_indices, dim=1).values
-
+            # 获取真实的结束位置的 token_id
             actual_first_eos_indices = torch.clamp(first_eos_indices_values, max=seq_len)
 
             col_indices_for_comparison = torch.arange(seq_len, device=device).unsqueeze(0).expand_as(generated_ids)
-
+            # 获取需要用 eos_token_id 替换的位置bool
             replace_mask = col_indices_for_comparison > actual_first_eos_indices.unsqueeze(1)
-
+            # 对应位置替换为 eos_token_id
             generated_ids[replace_mask] = self.tokenizer.eos_token_id
 
         return generated_ids
