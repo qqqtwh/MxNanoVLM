@@ -3,6 +3,30 @@ from types import SimpleNamespace
 import time
 import math
 from .torch_utils import get_world_size
+import torch
+
+def top_k_top_p_filtering(logits, top_k=0, top_p=1.0, filter_value=-float('Inf')):
+    # logits (bs,960)
+    top_k = min(top_k, logits.size(-1))  # Safety
+
+    if top_k > 0:
+        # Remove all tokens with a probability less than the top-k tokens
+        indices_to_remove = logits < torch.topk(logits, top_k)[0][..., -1, None] # (bs,960)
+        logits = logits.masked_fill(indices_to_remove, filter_value)    # 需要移除的地方用 -inf 填充
+
+    if top_p < 1.0:
+        sorted_logits, sorted_indices = torch.sort(logits, descending=True)
+        cumulative_probs = torch.softmax(sorted_logits, dim=-1).cumsum(dim=-1)
+
+        sorted_indices_to_remove = cumulative_probs > top_p # 移除cp大于top_p的值
+
+        sorted_indices_to_remove[..., 0] = False    # 保留首个token
+        
+        indices_to_remove = sorted_indices_to_remove.scatter(1, sorted_indices, sorted_indices_to_remove) # (bs,960)
+        logits = logits.masked_fill(indices_to_remove, filter_value) # (bs,960)
+
+    return logits
+
 
 def get_lr(it, max_lr, max_steps):
     min_lr = max_lr * 0.1

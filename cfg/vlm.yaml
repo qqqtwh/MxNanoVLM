@@ -10,6 +10,7 @@ vit_n_blocks: 12
 vit_ln_eps: 1.0e-6
 vit_cls_flag: false
 vit_model_type: "google/siglip2-base-patch16-512"
+vit_model_dir: "./resources/models/google-siglip2-base-patch16-512"
 
 # --- Language Model (LM) ---
 lm_hidden_dim: 960

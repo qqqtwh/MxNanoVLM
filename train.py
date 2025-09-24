@@ -8,8 +8,9 @@ import sys
 os.chdir(sys.path[0])
 import torch
 import contextlib
+from dataclasses import asdict
 from utils.torch_utils import init_dist,is_master,is_dist,destroy_dist,get_world_size,dist_gather,get_rank
-from utils.common import load_config,get_run_name,get_lr
+from utils.common import get_run_name,get_lr
 from utils.log import get_logger
 from utils.evaluation import cli_evaluate
 from data.dataloader import get_dataloaders
@@ -18,10 +19,12 @@ from torch.nn.parallel import DistributedDataParallel
 import time
 from datetime import datetime
 import pytz
+import wandb
 from statistics import mean
 import argparse
-from models.vison_language_model import VisionLanguageModel
+from models.vision_language_model import VisionLanguageModel
 from data.dataset import synchronized_dataloader_step
+from data.config import TrainConfig,VLMConfig
 
 train_time = datetime.now(pytz.timezone('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M:%S')
 main_logger = get_logger(f'logs/{train_time}_train.log')
@@ -32,17 +35,34 @@ def train(train_config,vlm_config):
     
     # 1.获取数据集与模型
     train_loader,val_loader = get_dataloaders(train_config, vlm_config)
+    run_name = get_run_name(train_config,vlm_config)
+
+    total_train_dataset_size = int(len(train_loader.dataset)*get_world_size())
+    total_valid_dataset_size = int(len(val_loader.dataset)*get_world_size())
+
+    if train_config.log_wandb and is_master:
+        if train_config.data_cutoff_idx is None:
+            run_name = run_name.replace("full_ds", f"{total_train_dataset_size}samples")
+    if train_config.log_wandb and is_master():
+        run = wandb.init(
+            entity=train_config.wandb_entity,
+            project="MxnanoVLM",
+            name=run_name,
+        )
 
     if train_config.resume_from_vlm_checkpoint:
         model = VisionLanguageModel.from_pretrained(vlm_config.vlm_checkpoint_path)
     else:
         model = VisionLanguageModel(vlm_config, backbone = vlm_config.vlm_load_backbone_weights)
-    run_name = get_run_name(train_config,vlm_config)
 
+    
     if is_master():
+        main_logger.info(f'{run_name}')
+        main_logger.info(f'-----{len(train_loader.dataset)}-- {len(val_loader.dataset)}')
+
         main_logger.info(f"nanVLM 使用 {sum(p.numel() for p in model.parameters())} 参数量进行初始化")
         main_logger.info(f"训练摘要 {'(global)' if is_dist() else ''}: 在 {int(get_world_size()) if is_dist() else 1} 个GPU上训练")
-        main_logger.info(f"     训练集有 {int(len(train_loader)*train_config.batch_size*get_world_size())} 条, 验证集有 {int(len(val_loader)*train_config.batch_size*get_world_size())} 条")
+        main_logger.info(f"     训练集有 {total_train_dataset_size} 条, 验证集有 {total_valid_dataset_size} 条")
         main_logger.info(f"     每个 GPU上 训练集有 {int(len(train_loader))} 个 batch, 验证集有 {int(len(val_loader))} 个 batch")
         main_logger.info(f"     batch_size {int(train_config.batch_size)}")
         main_logger.info(f"     梯度累积 {int(train_config.batch_size*train_config.gradient_accumulation_steps)} 个 batch 更新")
@@ -113,8 +133,6 @@ def train(train_config,vlm_config):
         optimizer.zero_grad()
 
         for i,batch in enumerate(synchronized_dataloader_step(train_loader, is_dist())):
-            if is_master():
-                main_logger.info(f'### {get_rank()} batch {i}/{len(train_loader)} ###')
                 
             is_update_step = (i+1) % train_config.gradient_accumulation_steps or i+1 == len(train_loader)
             batch_start_time = time.time()
@@ -182,6 +200,9 @@ def train(train_config,vlm_config):
             accumulated_stats['post_process_time'].append(post_process_time)
             accumulated_stats['images_per_sample'].extend(images_per_sample)
 
+            if is_master():
+                main_logger.info(f'### batch {i}/{len(train_loader)}    batch_loss {batch_loss} ###')
+
             # 4.模型评估
             if train_config.eval_in_epochs and global_step % train_config.eval_interval == 0 and is_update_step and global_step > 0:
                 if is_master(): 
@@ -212,7 +233,6 @@ def train(train_config,vlm_config):
                     lmms_results = {}
                     if train_config.use_lmms_eval:
                         
-                        
                         eval_args = argparse.Namespace(
                             model=model.module if is_dist() else model,
                             tasks=train_config.lmms_eval_tasks,
@@ -232,6 +252,10 @@ def train(train_config,vlm_config):
 
                     if is_master():
                         main_logger.info(f"Step: {global_step}, Val Loss: {avg_val_loss:.4f}, Tokens/s: {tokens_per_second:.2f}")
+                        main_logger.info(**{f"lmms_eval/{key}": value for key, value in lmms_results.items()})
+                        if train_config.log_wandb:
+                            run.log({
+                                "val_loss": avg_val_loss, **{f"lmms_eval/{key}": value for key, value in lmms_results.items()}}, step=global_step)
                 model.train()        
 
             # 5.记录日志
@@ -260,6 +284,14 @@ def train(train_config,vlm_config):
                 else:
                     stats['min_images_per_sample'] = min(accumulated_stats['images_per_sample'])
                 
+                if train_config.log_wandb and is_master():
+                    run.log({
+                        **{f"training_stats/{key}": value for key, value in stats.items()},
+                    }, step=global_step)
+                
+                for key, value in stats.items():
+                    main_logger.info(f"training_stats/{key}: {value}")
+
                 for key in accumulated_stats:
                     accumulated_stats[key] = []
 
@@ -267,6 +299,12 @@ def train(train_config,vlm_config):
                 # 所有GPU上的平均 batch 损失
                 batch_loss_gathered = mean(dist_gather(batch_loss)) if is_dist() else batch_loss
 
+                if train_config.log_wandb and is_master():
+                    run.log({
+                        "batch_loss": batch_loss_gathered,
+                        **({"grad_norm": grad_norm} if train_config.max_grad_norm is not None else {})
+                    }, step=global_step)
+                main_logger.info(f"Epoch: {epoch}, Step: {global_step}/{train_config.max_training_steps}, batch Loss: {batch_loss_gathered:.4f}")
                 global_step+=1
                 if global_step>= train_config.max_training_steps:
                     break
@@ -286,6 +324,10 @@ def train(train_config,vlm_config):
         epoch_tokens_per_second = total_tokens_processed / epoch_duration
 
         if is_master():
+            if train_config.log_wandb:
+                run.log({"epoch_loss": avg_train_loss,
+                         "epoch_duration": epoch_duration,
+                         "epoch_tokens_per_second": epoch_tokens_per_second})
             
             main_logger.info(f"Epoch: {epoch}, Step: {global_step}/{train_config.max_training_steps}, Train Loss: {avg_train_loss:.4f} | Time: {epoch_duration:.2f}s | T/s: {epoch_tokens_per_second:.2f}")
 
@@ -303,11 +345,15 @@ def train(train_config,vlm_config):
         main_logger.info(f"每个 epoch 平均时长: {avg_train_time_per_epoch:.2f}s")
         main_logger.info(f"每条样本的平均训练时长: {avg_time_per_sample:.4f}s")
 
+        if train_config.log_wandb:
+            run.summary["avg_epoch_time"] = avg_train_time_per_epoch
+            run.summary["avg_time_per_sample"] = avg_time_per_sample
+            run.finish()
 
 def main():
 
-    vlm_config = load_config('cfg/vlm.yaml')
-    train_config = load_config('cfg/train.yaml')
+    vlm_config = VLMConfig.from_yaml('cfg/vlm.yaml')
+    train_config = TrainConfig.from_yaml('cfg/train.yaml')
 
     if "RANK" in os.environ and "WORLD_SIZE" in os.environ:
         init_dist()
@@ -320,10 +366,10 @@ def main():
         main_logger.info('--- Train 配置 ---')
         main_logger.info(train_config)
         
-    try:
-        train(train_config,vlm_config)
-    except Exception as e:
-        main_logger.error(f'{e}')
+    train(train_config,vlm_config)
+    # try:
+    # except Exception as e:
+    #     main_logger.error(f'{e}')
 
     if is_dist():
         destroy_dist()
